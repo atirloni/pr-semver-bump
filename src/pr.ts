@@ -1,78 +1,101 @@
 import * as github from '@actions/github'
 import type { ActionConfig, PullRequest, ReleaseType } from './types'
 
-// Returns the PR number from a commit message, or null if one can't be found.
+/** Matches the default merge-commit subject GitHub generates, e.g. `Merge pull request #42 from ...`. */
+const MERGE_COMMIT_PR_PATTERN = /Merge pull request #(\d+) from/
+
+/** Matches the `(#42)` suffix GitHub appends to squash-merge commit titles. */
+const SQUASH_COMMIT_PR_PATTERN = /\(#(\d+)\)/
+
+/**
+ * Extracts a PR number from a commit message.
+ *
+ * @returns The PR number as a string, or `null` if the message references none.
+ */
 export function extractPRNumber(commitMsg: string): string | null {
-  const re = /Merge pull request #(\d+) from/
-  const matches = commitMsg.match(re)
-  if (matches !== null && matches.length > 1) {
-    return matches[1].trim()
+  const mergeMatch = commitMsg.match(MERGE_COMMIT_PR_PATTERN)
+  if (mergeMatch) {
+    return mergeMatch[1].trim()
   }
 
-  // Squash Merges do not have the merge pull request commit message
-  // but use the PR Title (#<pr num>) syntax by default.
-  const squashRE = /\(#(\d+)\)/
-  const squashMatches = commitMsg.match(squashRE)
-  if (squashMatches !== null && squashMatches.length > 1) {
-    return squashMatches[1].trim()
+  // Squash merges drop the "Merge pull request" subject and instead append "(#<num>)" to the title.
+  const squashMatch = commitMsg.match(SQUASH_COMMIT_PR_PATTERN)
+  if (squashMatch) {
+    return squashMatch[1].trim()
   }
 
   return null
 }
 
+/**
+ * Looks up the merged PR that a commit SHA belongs to via GitHub search.
+ *
+ * Used as a fallback for rebase merges, which leave no PR reference in the
+ * commit message.
+ *
+ * @returns The matching merged PR, or `null` when the commit belongs to no PR
+ * (e.g. a direct push). Returning `null` lets the caller skip gracefully
+ * instead of failing the run.
+ * @throws If the search API request itself fails.
+ */
 export async function searchPRByCommit(
   commitSHA: string | undefined,
   config: Pick<ActionConfig, 'octokit'>,
-): Promise<PullRequest> {
-  // Query GitHub to see if the commit sha is related to a PR.
-  // Rebase merge will not have the information in the commit message.
+): Promise<PullRequest | null> {
   try {
-    const q = `type:pr is:merged ${commitSHA}`
-    const data = await config.octokit.rest.search.issuesAndPullRequests({ q })
+    const query = `type:pr is:merged ${commitSHA}`
+    const { data } = await config.octokit.rest.search.issuesAndPullRequests({ q: query })
 
-    if (data.data.total_count < 1) {
-      throw new Error('No results found querying for the PR')
+    // No merged PR matches this commit; let the caller decide how to handle it.
+    if (data.total_count < 1) {
+      return null
     }
 
-    // We should only find one PR with the commit SHA that was merged so take the first one.
-    const pr = data.data.items[0]
-    return pr as PullRequest
-  } catch (fetchError) {
-    const message = (fetchError as Error).message
-    throw new Error(`Failed to find PR by commit SHA ${commitSHA}: ${message}`)
+    // A merged commit SHA maps to a single PR, so take the first match.
+    return data.items[0] as PullRequest
+  } catch (error) {
+    throw new Error(`Failed to find PR by commit SHA ${commitSHA}: ${(error as Error).message}`)
   }
 }
 
-// Fetches the details of a pull request.
+/**
+ * Fetches the full details of a pull request by number.
+ *
+ * @throws If the PR can't be fetched (e.g. it doesn't exist or access is denied).
+ */
 export async function fetchPR(
   num: number | string,
   config: Pick<ActionConfig, 'octokit'>,
 ): Promise<PullRequest> {
   try {
-    const data = await config.octokit.rest.pulls.get({
+    const { data } = await config.octokit.rest.pulls.get({
       ...github.context.repo,
       pull_number: Number(num),
     })
 
-    return data.data as PullRequest
-  } catch (fetchError) {
-    const message = (fetchError as Error).message
-    throw new Error(`failed to fetch data for PR #${num}: ${message}`)
+    return data as PullRequest
+  } catch (error) {
+    throw new Error(`failed to fetch data for PR #${num}: ${(error as Error).message}`)
   }
 }
 
-// Returns the release type (major, minor, patch or skip) based on the labels in the PR.
+/**
+ * Determines the release type from a PR's labels.
+ *
+ * Exactly one release label (or one no-op label) must be present.
+ *
+ * @throws If no recognized label is present, or if conflicting labels are.
+ */
 export function getReleaseType(
   pr: Pick<PullRequest, 'labels'>,
   config: Pick<ActionConfig, 'releaseLabels' | 'noopLabels'>,
 ): ReleaseType {
   const labelNames = pr.labels.map((label) => label.name)
   const releaseLabelsPresent = labelNames.filter((name) =>
-    Object.keys(config.releaseLabels).includes(name),
+    Object.hasOwn(config.releaseLabels, name),
   )
-  const noopLabelsPresent = labelNames.filter((name) =>
-    Object.keys(config.noopLabels).includes(name),
-  )
+  const noopLabelsPresent = labelNames.filter((name) => Object.hasOwn(config.noopLabels, name))
+
   if (releaseLabelsPresent.length === 0 && noopLabelsPresent.length === 0) {
     throw new Error('no release label specified on PR')
   }
@@ -81,7 +104,7 @@ export function getReleaseType(
   }
   if (releaseLabelsPresent.length >= 1 && noopLabelsPresent.length >= 1) {
     throw new Error(
-      `too manu labels specified, both release labels and noop labels specified: (${releaseLabelsPresent})  (${noopLabelsPresent}) on PR`,
+      `too many labels specified, both release labels and noop labels specified: (${releaseLabelsPresent})  (${noopLabelsPresent}) on PR`,
     )
   }
 
@@ -90,7 +113,50 @@ export function getReleaseType(
     : config.noopLabels[noopLabelsPresent[0]]
 }
 
-// Extracts the release notes from the PR body.
+/**
+ * Resolves the `[start, end)` line range of the PR body that holds the release notes.
+ *
+ * With no prefix or suffix configured, the entire body qualifies. A prefix
+ * moves the start to the line *after* its first match; a suffix moves the end
+ * to its first match once we're already inside the notes region.
+ */
+function findReleaseNotesBounds(
+  lines: string[],
+  prefixPattern: RegExp | undefined,
+  suffixPattern: RegExp | undefined,
+): { start: number; end: number } {
+  // Without a prefix, the notes begin at the very first line.
+  let withinNotes = prefixPattern === undefined
+  let start = 0
+  // With no boundaries the notes span the whole body; with either boundary
+  // configured, include nothing until a match reveals where they begin/end.
+  let end = prefixPattern === undefined && suffixPattern === undefined ? lines.length : 0
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+
+    if (withinNotes) {
+      if (suffixPattern?.test(line)) {
+        end = i
+        break
+      }
+    } else if (prefixPattern?.test(line)) {
+      // Notes start on the next line and run to the end, unless a later suffix trims them.
+      start = i + 1
+      end = lines.length
+      withinNotes = true
+    }
+  }
+
+  return { start, end }
+}
+
+/**
+ * Extracts the release notes from a PR body, optionally bounded by the
+ * configured prefix/suffix patterns, and trims surrounding whitespace.
+ *
+ * @throws If notes are required but the resolved range is empty.
+ */
 export function getReleaseNotes(
   pr: Pick<PullRequest, 'body'>,
   config: Pick<
@@ -102,37 +168,12 @@ export function getReleaseNotes(
 
   if (pr.body !== null && pr.body !== '') {
     const lines = pr.body.split(/\r?\n/)
-    let withinNotes = config.releaseNotesPrefixPattern === undefined
-    let firstLine = 0
-
-    // Default to the entire PR body.
-    let lastLine = lines.length
-
-    // If a prefix or suffix has been defined default to none of the PR body.
-    if (
-      config.releaseNotesPrefixPattern !== undefined ||
-      config.releaseNotesSuffixPattern !== undefined
-    ) {
-      lastLine = 0
-    }
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-
-      if (withinNotes) {
-        if (config.releaseNotesSuffixPattern?.test(line)) {
-          lastLine = i
-          break
-        }
-      } else if (config.releaseNotesPrefixPattern?.test(line)) {
-        // Now that we've seen the prefix, set the lastLine to the end of the message.
-        lastLine = lines.length
-        firstLine = i + 1
-        withinNotes = true
-      }
-    }
-
-    notes = lines.slice(firstLine, lastLine)
+    const { start, end } = findReleaseNotesBounds(
+      lines,
+      config.releaseNotesPrefixPattern,
+      config.releaseNotesSuffixPattern,
+    )
+    notes = lines.slice(start, end)
   }
 
   if (notes.length === 0 && config.requireReleaseNotes) {

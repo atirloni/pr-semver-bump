@@ -159,6 +159,23 @@ describe('validate mode', () => {
 
     expect(mocks.core.setFailed).toHaveBeenCalledWith('PR validation failed: bad notes')
   })
+
+  test('reports a skip and emits no version when the release type is skip', async () => {
+    mocks.getConfig.mockReturnValue(asConfig({ mode: 'validate', v: '' }))
+    mocks.context.eventName = 'pull_request'
+    mocks.context.payload = { pull_request: { number: 42 } }
+    mocks.fetchPR.mockResolvedValue(mockPR)
+    mocks.getReleaseType.mockReturnValue('skip')
+    mocks.getCurrentVersion.mockResolvedValue('1.2.3')
+
+    await loadIndex()
+
+    expect(mocks.core.setOutput).toHaveBeenCalledWith('old-version', '1.2.3')
+    expect(mocks.core.setOutput).toHaveBeenCalledWith('skipped', true)
+    expect(mocks.core.setOutput).not.toHaveBeenCalledWith('version', expect.anything())
+    expect(mocks.getReleaseNotes).not.toHaveBeenCalled()
+    expect(mocks.core.setFailed).not.toHaveBeenCalled()
+  })
 })
 
 describe('bump mode', () => {
