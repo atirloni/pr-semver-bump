@@ -1,7 +1,6 @@
 # pr-semver-bump
 
 [![Build Status](https://img.shields.io/github/actions/workflow/status/atirloni/pr-semver-bump/master-ci.yml?branch=master)](https://github.com/atirloni/pr-semver-bump/actions/workflows/master-ci.yml?query=branch%3Amaster)
-[![CodeQL](https://github.com/atirloni/pr-semver-bump/actions/workflows/codeql-analysis.yml/badge.svg?branch=master)](https://github.com/atirloni/pr-semver-bump/actions/workflows/codeql-analysis.yml?query=branch%3Amaster)
 [![Newest Release (semver)](https://img.shields.io/github/v/release/atirloni/pr-semver-bump?sort=semver)](https://github.com/atirloni/pr-semver-bump/releases)
 [![Newest Tag (semver)](https://img.shields.io/github/v/tag/atirloni/pr-semver-bump)](https://github.com/atirloni/pr-semver-bump/tags)
 [![License](https://img.shields.io/github/license/atirloni/pr-semver-bump)](https://github.com/atirloni/pr-semver-bump/blob/master/LICENSE)
