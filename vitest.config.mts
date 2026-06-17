@@ -6,7 +6,6 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'json'],
       include: ['src/**/*.ts'],
-      exclude: ['src/index.ts', 'src/types.ts'],
     },
     globals: true,
   },
