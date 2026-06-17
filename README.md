@@ -70,7 +70,7 @@ The action will fail (in either mode) if any of the following are true:
 
 - the pull request is not labeled with an appropriate release label;
 - the pull request is labeled with more than one release label;
-- `require-release-info` is true, and no release info is found in the pull request description.
+- `require-release-notes` is true, and no release notes are found in the pull request description.
 
 ## Inputs
 
@@ -104,8 +104,8 @@ with:
   repo-token: ${{ secrets.GITHUB_TOKEN }}
   minor-label: new-feature
   patch-label: bug-fix
-  noop-labels:
-    - documentation change
+  noop-labels: |
+    documentation change
 ```
 
 ### Requiring Release Notes
@@ -208,8 +208,8 @@ jobs:
           major-label: major release
           minor-label: minor release
           patch-label: patch release
-          noop-labels:
-            - documentation change
+          noop-labels: |
+            documentation change
           require-release-notes: true
           release-notes-prefix: ''
           release-notes-suffix: ''
@@ -241,8 +241,8 @@ jobs:
           major-label: major release
           minor-label: minor release
           patch-label: patch release
-          noop-labels:
-            - documentation change
+          noop-labels: |
+            documentation change
           require-release-notes: true
           release-notes-prefix: ''
           release-notes-suffix: ''

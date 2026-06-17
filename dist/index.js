@@ -32770,7 +32770,35 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getConfig = getConfig;
 const core = __importStar(__nccwpck_require__(33));
 const github = __importStar(__nccwpck_require__(9898));
-// Gets all the required inputs and validates them before proceeding.
+/** Compiles a non-empty input into a RegExp; blank input yields no pattern. */
+function compilePattern(input) {
+    return input === '' ? undefined : new RegExp(input);
+}
+/** Reads a boolean input, treating only the literal `'true'` as true (case-insensitive). */
+function parseBooleanInput(name) {
+    return core.getInput(name).toLowerCase() === 'true';
+}
+/** Maps each configured (or default) release label to the bump it triggers. */
+function buildReleaseLabels() {
+    return {
+        [core.getInput('major-label') || 'major release']: 'major',
+        [core.getInput('minor-label') || 'minor release']: 'minor',
+        [core.getInput('patch-label') || 'patch release']: 'patch',
+    };
+}
+/** Maps each configured no-op label to `'skip'`, marking PRs that skip a release. */
+function buildNoopLabels() {
+    const noopLabels = {};
+    for (const name of core.getMultilineInput('noop-labels', { trimWhitespace: true })) {
+        noopLabels[name] = 'skip';
+    }
+    return noopLabels;
+}
+/**
+ * Reads and validates all action inputs into a single {@link ActionConfig}.
+ *
+ * @throws If `mode` is missing or is anything other than `validate`/`bump`.
+ */
 function getConfig() {
     const mode = core.getInput('mode', { required: true }).toLowerCase();
     if (mode !== 'validate' && mode !== 'bump') {
@@ -32778,35 +32806,16 @@ function getConfig() {
     }
     const token = core.getInput('repo-token', { required: true });
     core.setSecret(token);
-    const releaseNotesPrefix = core.getInput('release-notes-prefix');
-    const releaseNotesSuffix = core.getInput('release-notes-suffix');
-    let releaseNotesPrefixPattern;
-    if (releaseNotesPrefix !== undefined && releaseNotesPrefix !== '') {
-        releaseNotesPrefixPattern = new RegExp(releaseNotesPrefix);
-    }
-    let releaseNotesSuffixPattern;
-    if (releaseNotesSuffix !== undefined && releaseNotesSuffix !== '') {
-        releaseNotesSuffixPattern = new RegExp(releaseNotesSuffix);
-    }
-    const releaseLabels = {};
-    releaseLabels[core.getInput('major-label') || 'major release'] = 'major';
-    releaseLabels[core.getInput('minor-label') || 'minor release'] = 'minor';
-    releaseLabels[core.getInput('patch-label') || 'patch release'] = 'patch';
-    const noopLabels = {};
-    const configuredNoopLabels = core.getMultilineInput('noop-labels', { trimWhitespace: true });
-    for (let i = 0; i < configuredNoopLabels.length; i++) {
-        noopLabels[configuredNoopLabels[i]] = 'skip';
-    }
     return {
-        mode: mode,
+        mode,
         octokit: github.getOctokit(token),
-        releaseLabels,
-        noopLabels,
-        releaseNotesPrefixPattern,
-        releaseNotesSuffixPattern,
-        requireReleaseNotes: core.getInput('require-release-notes').toLowerCase() === 'true',
-        baseBranch: core.getInput('base-branch').toLowerCase() === 'true',
-        v: core.getInput('with-v').toLowerCase() === 'true' ? 'v' : '',
+        releaseLabels: buildReleaseLabels(),
+        noopLabels: buildNoopLabels(),
+        releaseNotesPrefixPattern: compilePattern(core.getInput('release-notes-prefix')),
+        releaseNotesSuffixPattern: compilePattern(core.getInput('release-notes-suffix')),
+        requireReleaseNotes: parseBooleanInput('require-release-notes'),
+        baseBranch: parseBooleanInput('base-branch'),
+        v: parseBooleanInput('with-v') ? 'v' : '',
     };
 }
 
@@ -32855,21 +32864,34 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.toErrorMessage = toErrorMessage;
+exports.isActivePR = isActivePR;
+exports.isMergeCommit = isMergeCommit;
+exports.validateActivePR = validateActivePR;
+exports.bumpAndTagNewVersion = bumpAndTagNewVersion;
+exports.run = run;
 const core = __importStar(__nccwpck_require__(33));
 const github = __importStar(__nccwpck_require__(9898));
 const semver_1 = __importDefault(__nccwpck_require__(1021));
 const config_1 = __nccwpck_require__(4605);
 const pr_1 = __nccwpck_require__(9085);
 const version_1 = __nccwpck_require__(6359);
-// Returns true if the current context looks like an active PR.
+/** Normalizes an unknown thrown value into a human-readable message. */
+function toErrorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
+}
+/** True when the workflow is reacting to an open pull request event. */
 function isActivePR() {
     return (github.context.eventName === 'pull_request' && github.context.payload.pull_request !== undefined);
 }
-// Returns true if the current context looks like a merge commit.
+/** True when the workflow is reacting to a push that carries a head commit. */
 function isMergeCommit() {
     return github.context.eventName === 'push' && github.context.payload.head_commit !== undefined;
 }
-// Ensures that the currently active PR contains the required release metadata.
+/**
+ * Validate mode: confirm the active PR carries the metadata required for a
+ * release and report the version it would produce. Nothing is tagged.
+ */
 async function validateActivePR(config) {
     const activePR = github.context.payload.pull_request;
     if (!isActivePR() || activePR === undefined) {
@@ -32881,22 +32903,35 @@ async function validateActivePR(config) {
         pr = await (0, pr_1.fetchPR)(activePR.number, config);
     }
     catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        core.setFailed(message);
+        core.setFailed(toErrorMessage(error));
         return;
     }
     let releaseType;
-    let releaseNotes;
     try {
         releaseType = (0, pr_1.getReleaseType)(pr, config);
-        releaseNotes = (0, pr_1.getReleaseNotes)(pr, config);
     }
     catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        core.setFailed(`PR validation failed: ${message}`);
+        core.setFailed(`PR validation failed: ${toErrorMessage(error)}`);
         return;
     }
     const currentVersion = await (0, version_1.getCurrentVersion)(config);
+    // A no-op/skip label produces no new version on merge, so report the skip and
+    // stop. Mirrors bump mode and avoids semver.inc(version, 'skip') returning null.
+    if (releaseType === 'skip') {
+        core.info(`current version: ${config.v}${currentVersion}`);
+        core.info('release is marked as a no-op; no new version would be tagged on merge');
+        core.setOutput('old-version', `${config.v}${currentVersion}`);
+        core.setOutput('skipped', true);
+        return;
+    }
+    let releaseNotes;
+    try {
+        releaseNotes = (0, pr_1.getReleaseNotes)(pr, config);
+    }
+    catch (error) {
+        core.setFailed(`PR validation failed: ${toErrorMessage(error)}`);
+        return;
+    }
     const newVersion = semver_1.default.inc(currentVersion, releaseType);
     core.info(`current version: ${config.v}${currentVersion}`);
     core.info(`next version: ${config.v}${newVersion}`);
@@ -32904,33 +32939,38 @@ async function validateActivePR(config) {
     core.setOutput('old-version', `${config.v}${currentVersion}`);
     core.setOutput('version', `${config.v}${newVersion}`);
     core.setOutput('release-notes', releaseNotes);
+    core.setOutput('skipped', false);
 }
-// Increments the version according to the release type and tags a new version with release notes.
+/**
+ * Bump mode: resolve the merged PR behind the head commit and, unless its
+ * label marks the release as skipped, tag a new annotated version.
+ */
 async function bumpAndTagNewVersion(config) {
     if (!isMergeCommit()) {
         core.warning("in 'bump' mode, but this doesn't look like a PR merge commit event (is your workflow misconfigured?)");
         return;
     }
-    const num = (0, pr_1.extractPRNumber)(github.context.payload.head_commit.message);
+    const prNumber = (0, pr_1.extractPRNumber)(github.context.payload.head_commit.message);
     let pr;
-    if (num == null) {
+    if (prNumber == null) {
         core.info('Unable to determine PR from commit msg, searching for PR by SHA');
-        // Try to search the commit sha for the PR number.
-        pr = await (0, pr_1.searchPRByCommit)(process.env.GITHUB_SHA, config);
-        if (pr == null) {
-            // Don't want to fail the job if some other commit comes in, but let's warn about it.
+        // Rebase merges leave no PR reference in the commit message; fall back to a SHA search.
+        const matchedPR = await (0, pr_1.searchPRByCommit)(process.env.GITHUB_SHA, config);
+        if (matchedPR == null) {
+            // Don't fail the job for an unrelated commit, but make the skip visible.
             // Might be a good point for configuration in the future.
             core.warning("head commit doesn't look like a PR merge, skipping version bumping and tagging");
             return;
         }
+        pr = matchedPR;
     }
     else {
-        pr = await (0, pr_1.fetchPR)(num, config);
+        pr = await (0, pr_1.fetchPR)(prNumber, config);
     }
-    core.info(`Processing version bump for PR request #${pr.number}`);
+    core.info(`Processing version bump for PR #${pr.number}`);
     const releaseType = (0, pr_1.getReleaseType)(pr, config);
-    // If the release is skipped, we do not create a new tag.
     const currentVersion = await (0, version_1.getCurrentVersion)(config);
+    // A skipped release records the current version but creates no new tag.
     if (releaseType !== 'skip') {
         const releaseNotes = (0, pr_1.getReleaseNotes)(pr, config);
         const newVersion = semver_1.default.inc(currentVersion, releaseType);
@@ -32942,6 +32982,7 @@ async function bumpAndTagNewVersion(config) {
     core.setOutput('old-version', `${config.v}${currentVersion}`);
     core.setOutput('skipped', releaseType === 'skip');
 }
+/** Action entrypoint: load config and dispatch to the requested mode. */
 async function run() {
     try {
         const config = (0, config_1.getConfig)();
@@ -32953,10 +32994,9 @@ async function run() {
         }
     }
     catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
         const stack = error instanceof Error ? error.stack : undefined;
         core.info(stack ?? '');
-        core.setFailed(`unexpected error: ${message}`);
+        core.setFailed(`unexpected error: ${toErrorMessage(error)}`);
     }
 }
 run();
@@ -33009,59 +33049,81 @@ exports.fetchPR = fetchPR;
 exports.getReleaseType = getReleaseType;
 exports.getReleaseNotes = getReleaseNotes;
 const github = __importStar(__nccwpck_require__(9898));
-// Returns the PR number from a commit message, or null if one can't be found.
+/** Matches the default merge-commit subject GitHub generates, e.g. `Merge pull request #42 from ...`. */
+const MERGE_COMMIT_PR_PATTERN = /Merge pull request #(\d+) from/;
+/** Matches the `(#42)` suffix GitHub appends to squash-merge commit titles. */
+const SQUASH_COMMIT_PR_PATTERN = /\(#(\d+)\)/;
+/**
+ * Extracts a PR number from a commit message.
+ *
+ * @returns The PR number as a string, or `null` if the message references none.
+ */
 function extractPRNumber(commitMsg) {
-    const re = /Merge pull request #(\d+) from/;
-    const matches = commitMsg.match(re);
-    if (matches !== null && matches.length > 1) {
-        return matches[1].trim();
+    const mergeMatch = commitMsg.match(MERGE_COMMIT_PR_PATTERN);
+    if (mergeMatch) {
+        return mergeMatch[1].trim();
     }
-    // Squash Merges do not have the merge pull request commit message
-    // but use the PR Title (#<pr num>) syntax by default.
-    const squashRE = /\(#(\d+)\)/;
-    const squashMatches = commitMsg.match(squashRE);
-    if (squashMatches !== null && squashMatches.length > 1) {
-        return squashMatches[1].trim();
+    // Squash merges drop the "Merge pull request" subject and instead append "(#<num>)" to the title.
+    const squashMatch = commitMsg.match(SQUASH_COMMIT_PR_PATTERN);
+    if (squashMatch) {
+        return squashMatch[1].trim();
     }
     return null;
 }
+/**
+ * Looks up the merged PR that a commit SHA belongs to via GitHub search.
+ *
+ * Used as a fallback for rebase merges, which leave no PR reference in the
+ * commit message.
+ *
+ * @returns The matching merged PR, or `null` when the commit belongs to no PR
+ * (e.g. a direct push). Returning `null` lets the caller skip gracefully
+ * instead of failing the run.
+ * @throws If the search API request itself fails.
+ */
 async function searchPRByCommit(commitSHA, config) {
-    // Query GitHub to see if the commit sha is related to a PR.
-    // Rebase merge will not have the information in the commit message.
     try {
-        const q = `type:pr is:merged ${commitSHA}`;
-        const data = await config.octokit.rest.search.issuesAndPullRequests({ q });
-        if (data.data.total_count < 1) {
-            throw new Error('No results found querying for the PR');
+        const query = `type:pr is:merged ${commitSHA}`;
+        const { data } = await config.octokit.rest.search.issuesAndPullRequests({ q: query });
+        // No merged PR matches this commit; let the caller decide how to handle it.
+        if (data.total_count < 1) {
+            return null;
         }
-        // We should only find one PR with the commit SHA that was merged so take the first one.
-        const pr = data.data.items[0];
-        return pr;
+        // A merged commit SHA maps to a single PR, so take the first match.
+        return data.items[0];
     }
-    catch (fetchError) {
-        const message = fetchError.message;
-        throw new Error(`Failed to find PR by commit SHA ${commitSHA}: ${message}`);
+    catch (error) {
+        throw new Error(`Failed to find PR by commit SHA ${commitSHA}: ${error.message}`);
     }
 }
-// Fetches the details of a pull request.
+/**
+ * Fetches the full details of a pull request by number.
+ *
+ * @throws If the PR can't be fetched (e.g. it doesn't exist or access is denied).
+ */
 async function fetchPR(num, config) {
     try {
-        const data = await config.octokit.rest.pulls.get({
+        const { data } = await config.octokit.rest.pulls.get({
             ...github.context.repo,
             pull_number: Number(num),
         });
-        return data.data;
+        return data;
     }
-    catch (fetchError) {
-        const message = fetchError.message;
-        throw new Error(`failed to fetch data for PR #${num}: ${message}`);
+    catch (error) {
+        throw new Error(`failed to fetch data for PR #${num}: ${error.message}`);
     }
 }
-// Returns the release type (major, minor, patch or skip) based on the labels in the PR.
+/**
+ * Determines the release type from a PR's labels.
+ *
+ * Exactly one release label (or one no-op label) must be present.
+ *
+ * @throws If no recognized label is present, or if conflicting labels are.
+ */
 function getReleaseType(pr, config) {
     const labelNames = pr.labels.map((label) => label.name);
-    const releaseLabelsPresent = labelNames.filter((name) => Object.keys(config.releaseLabels).includes(name));
-    const noopLabelsPresent = labelNames.filter((name) => Object.keys(config.noopLabels).includes(name));
+    const releaseLabelsPresent = labelNames.filter((name) => Object.hasOwn(config.releaseLabels, name));
+    const noopLabelsPresent = labelNames.filter((name) => Object.hasOwn(config.noopLabels, name));
     if (releaseLabelsPresent.length === 0 && noopLabelsPresent.length === 0) {
         throw new Error('no release label specified on PR');
     }
@@ -33069,42 +33131,55 @@ function getReleaseType(pr, config) {
         throw new Error(`too many release labels specified on PR: ${releaseLabelsPresent}`);
     }
     if (releaseLabelsPresent.length >= 1 && noopLabelsPresent.length >= 1) {
-        throw new Error(`too manu labels specified, both release labels and noop labels specified: (${releaseLabelsPresent})  (${noopLabelsPresent}) on PR`);
+        throw new Error(`too many labels specified, both release labels and noop labels specified: (${releaseLabelsPresent})  (${noopLabelsPresent}) on PR`);
     }
     return releaseLabelsPresent.length === 1
         ? config.releaseLabels[releaseLabelsPresent[0]]
         : config.noopLabels[noopLabelsPresent[0]];
 }
-// Extracts the release notes from the PR body.
+/**
+ * Resolves the `[start, end)` line range of the PR body that holds the release notes.
+ *
+ * With no prefix or suffix configured, the entire body qualifies. A prefix
+ * moves the start to the line *after* its first match; a suffix moves the end
+ * to its first match once we're already inside the notes region.
+ */
+function findReleaseNotesBounds(lines, prefixPattern, suffixPattern) {
+    // Without a prefix, the notes begin at the very first line.
+    let withinNotes = prefixPattern === undefined;
+    let start = 0;
+    // With no boundaries the notes span the whole body; with either boundary
+    // configured, include nothing until a match reveals where they begin/end.
+    let end = prefixPattern === undefined && suffixPattern === undefined ? lines.length : 0;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (withinNotes) {
+            if (suffixPattern?.test(line)) {
+                end = i;
+                break;
+            }
+        }
+        else if (prefixPattern?.test(line)) {
+            // Notes start on the next line and run to the end, unless a later suffix trims them.
+            start = i + 1;
+            end = lines.length;
+            withinNotes = true;
+        }
+    }
+    return { start, end };
+}
+/**
+ * Extracts the release notes from a PR body, optionally bounded by the
+ * configured prefix/suffix patterns, and trims surrounding whitespace.
+ *
+ * @throws If notes are required but the resolved range is empty.
+ */
 function getReleaseNotes(pr, config) {
     let notes = [];
     if (pr.body !== null && pr.body !== '') {
         const lines = pr.body.split(/\r?\n/);
-        let withinNotes = config.releaseNotesPrefixPattern === undefined;
-        let firstLine = 0;
-        // Default to the entire PR body.
-        let lastLine = lines.length;
-        // If a prefix or suffix has been defined default to none of the PR body.
-        if (config.releaseNotesPrefixPattern !== undefined ||
-            config.releaseNotesSuffixPattern !== undefined) {
-            lastLine = 0;
-        }
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            if (withinNotes) {
-                if (config.releaseNotesSuffixPattern?.test(line)) {
-                    lastLine = i;
-                    break;
-                }
-            }
-            else if (config.releaseNotesPrefixPattern?.test(line)) {
-                // Now that we've seen the prefix, set the lastLine to the end of the message.
-                lastLine = lines.length;
-                firstLine = i + 1;
-                withinNotes = true;
-            }
-        }
-        notes = lines.slice(firstLine, lastLine);
+        const { start, end } = findReleaseNotesBounds(lines, config.releaseNotesPrefixPattern, config.releaseNotesSuffixPattern);
+        notes = lines.slice(start, end);
     }
     if (notes.length === 0 && config.requireReleaseNotes) {
         throw new Error('missing release notes');
@@ -33162,22 +33237,29 @@ exports.getCurrentVersion = getCurrentVersion;
 const core = __importStar(__nccwpck_require__(33));
 const github = __importStar(__nccwpck_require__(9898));
 const semver_1 = __importDefault(__nccwpck_require__(1021));
+/** Version reported when the repository has no usable version tags yet. */
 const DEFAULT_VERSION = '0.0.0';
+/** Collects the SHAs of every commit reachable from the given branch. */
 async function getCommitsOnBranch(branch, config) {
     const commits = new Set();
-    for await (const response of config.octokit.paginate.iterator(config.octokit.rest.repos.listCommits, {
-        ...github.context.repo,
-        sha: branch,
-    })) {
-        response.data.forEach((commit) => {
+    for await (const response of config.octokit.paginate.iterator(config.octokit.rest.repos.listCommits, { ...github.context.repo, sha: branch })) {
+        for (const commit of response.data) {
             commits.add(commit.sha);
-        });
+        }
     }
     return commits;
 }
+/**
+ * Walks versions newest-first and returns the first one whose tag points at a
+ * commit on the branch.
+ *
+ * Annotated tags are dereferenced to the commit they wrap before comparing.
+ *
+ * @returns The matching version, or {@link DEFAULT_VERSION} if none match.
+ */
 async function getLatestVersionInCommits(commits, sortedVersions, objectsByVersion, config) {
-    for (let i = 0; i < sortedVersions.length; i++) {
-        const version = `${sortedVersions[i]}`;
+    for (const parsedVersion of sortedVersions) {
+        const version = `${parsedVersion}`;
         const refObj = objectsByVersion[version];
         if (refObj.type === 'commit' && commits.has(refObj.sha)) {
             return version;
@@ -33194,7 +33276,12 @@ async function getLatestVersionInCommits(commits, sortedVersions, objectsByVersi
     }
     return DEFAULT_VERSION;
 }
-// Tags the specified version and annotates it with the provided release notes.
+/**
+ * Tags the given version at the current commit and annotates it with the
+ * release notes.
+ *
+ * @returns The created tag name (prefixed with `v` when configured).
+ */
 async function createRelease(version, releaseNotes, config) {
     const tag = `${config.v}${version}`;
     const tagCreateResponse = await config.octokit.rest.git.createTag({
@@ -33211,23 +33298,32 @@ async function createRelease(version, releaseNotes, config) {
     });
     return tag;
 }
-// Returns the most recent tagged version in git.
+/**
+ * Finds the most recent tagged semantic version in the repository.
+ *
+ * When `baseBranch` is set, only tags reachable from the PR base branch are
+ * considered; otherwise the highest version tag wins.
+ *
+ * @returns The current version, or {@link DEFAULT_VERSION} when none is found.
+ */
 async function getCurrentVersion(config) {
-    const data = await config.octokit.rest.git.listMatchingRefs({
+    const matchingRefs = await config.octokit.rest.git.listMatchingRefs({
         ...github.context.repo,
         ref: 'tags/',
     });
     const objectsByVersion = {};
     const versions = [];
-    data.data.forEach((ref) => {
+    for (const ref of matchingRefs.data) {
         const version = semver_1.default.parse(ref.ref.replace(/^refs\/tags\//g, ''), { loose: true });
-        if (version !== null) {
-            if (ref.object !== undefined) {
-                objectsByVersion[`${version}`] = ref.object;
-            }
-            versions.push(version);
+        if (version === null) {
+            continue;
         }
-    });
+        if (ref.object !== undefined) {
+            objectsByVersion[`${version}`] = ref.object;
+        }
+        versions.push(version);
+    }
+    // Sort descending so the newest version is first.
     versions.sort(semver_1.default.rcompare);
     if (config.baseBranch) {
         const branch = process.env.GITHUB_BASE_REF || process.env.GITHUB_REF?.replace('refs/heads/', '');
@@ -33235,10 +33331,7 @@ async function getCurrentVersion(config) {
         const commits = await getCommitsOnBranch(branch, config);
         return getLatestVersionInCommits(commits, versions, objectsByVersion, config);
     }
-    if (versions[0] !== undefined) {
-        return `${versions[0]}`;
-    }
-    return DEFAULT_VERSION;
+    return versions[0] !== undefined ? `${versions[0]}` : DEFAULT_VERSION;
 }
 
 

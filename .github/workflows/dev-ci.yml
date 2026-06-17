@@ -1,8 +1,6 @@
 name: Dev CI
 on:
-  push:
-    branches-ignore:
-      - master
+  pull_request:
 
 jobs:
   test:

@@ -43,7 +43,7 @@ test('searchPRByCommit returns a PR', async () => {
   expect(issuesAndPullRequests).toHaveBeenCalledWith({ q: `type:pr is:merged ${sha}` })
 })
 
-test('searchPRByCommit fails to find PR', async () => {
+test('searchPRByCommit returns null when no PR matches the commit', async () => {
   const sha = '123456789'
   const config = asConfig({
     octokit: {
@@ -55,9 +55,7 @@ test('searchPRByCommit fails to find PR', async () => {
     },
   })
 
-  await expect(searchPRByCommit(sha, config)).rejects.toThrow(
-    `Failed to find PR by commit SHA ${sha}: No results found querying for the PR`,
-  )
+  await expect(searchPRByCommit(sha, config)).resolves.toBeNull()
 })
 
 test('searchPRByCommit throws an error on query', async () => {
@@ -243,7 +241,7 @@ test('throws if both a valid release label and a noop label are present', () => 
 
   expect(() => {
     getReleaseType(mockPR, config)
-  }).toThrow('too manu labels specified, both release labels and noop labels specified')
+  }).toThrow('too many labels specified, both release labels and noop labels specified')
 })
 
 describe('can parse release notes', () => {
