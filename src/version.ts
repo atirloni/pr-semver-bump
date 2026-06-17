@@ -3,32 +3,42 @@ import * as github from '@actions/github'
 import semver from 'semver'
 import type { ActionConfig, GitRefObject } from './types'
 
+/** Version reported when the repository has no usable version tags yet. */
 const DEFAULT_VERSION = '0.0.0'
 
-async function getCommitsOnBranch(branch: string, config: Pick<ActionConfig, 'octokit'>) {
+/** Collects the SHAs of every commit reachable from the given branch. */
+async function getCommitsOnBranch(
+  branch: string,
+  config: Pick<ActionConfig, 'octokit'>,
+): Promise<Set<string>> {
   const commits = new Set<string>()
   for await (const response of config.octokit.paginate.iterator(
     config.octokit.rest.repos.listCommits,
-    {
-      ...github.context.repo,
-      sha: branch,
-    },
+    { ...github.context.repo, sha: branch },
   )) {
-    response.data.forEach((commit) => {
+    for (const commit of response.data) {
       commits.add(commit.sha)
-    })
+    }
   }
   return commits
 }
 
+/**
+ * Walks versions newest-first and returns the first one whose tag points at a
+ * commit on the branch.
+ *
+ * Annotated tags are dereferenced to the commit they wrap before comparing.
+ *
+ * @returns The matching version, or {@link DEFAULT_VERSION} if none match.
+ */
 async function getLatestVersionInCommits(
   commits: Set<string>,
   sortedVersions: semver.SemVer[],
   objectsByVersion: Record<string, GitRefObject>,
   config: Pick<ActionConfig, 'octokit'>,
-) {
-  for (let i = 0; i < sortedVersions.length; i++) {
-    const version = `${sortedVersions[i]}`
+): Promise<string> {
+  for (const parsedVersion of sortedVersions) {
+    const version = `${parsedVersion}`
     const refObj = objectsByVersion[version]
 
     if (refObj.type === 'commit' && commits.has(refObj.sha)) {
@@ -50,12 +60,17 @@ async function getLatestVersionInCommits(
   return DEFAULT_VERSION
 }
 
-// Tags the specified version and annotates it with the provided release notes.
+/**
+ * Tags the given version at the current commit and annotates it with the
+ * release notes.
+ *
+ * @returns The created tag name (prefixed with `v` when configured).
+ */
 export async function createRelease(
   version: string,
   releaseNotes: string,
   config: Pick<ActionConfig, 'octokit' | 'v'>,
-) {
+): Promise<string> {
   const tag = `${config.v}${version}`
   const tagCreateResponse = await config.octokit.rest.git.createTag({
     ...github.context.repo,
@@ -74,9 +89,18 @@ export async function createRelease(
   return tag
 }
 
-// Returns the most recent tagged version in git.
-export async function getCurrentVersion(config: Pick<ActionConfig, 'octokit' | 'baseBranch'>) {
-  const data = await config.octokit.rest.git.listMatchingRefs({
+/**
+ * Finds the most recent tagged semantic version in the repository.
+ *
+ * When `baseBranch` is set, only tags reachable from the PR base branch are
+ * considered; otherwise the highest version tag wins.
+ *
+ * @returns The current version, or {@link DEFAULT_VERSION} when none is found.
+ */
+export async function getCurrentVersion(
+  config: Pick<ActionConfig, 'octokit' | 'baseBranch'>,
+): Promise<string> {
+  const matchingRefs = await config.octokit.rest.git.listMatchingRefs({
     ...github.context.repo,
     ref: 'tags/',
   })
@@ -84,17 +108,18 @@ export async function getCurrentVersion(config: Pick<ActionConfig, 'octokit' | '
   const objectsByVersion: Record<string, GitRefObject> = {}
   const versions: semver.SemVer[] = []
 
-  data.data.forEach((ref) => {
+  for (const ref of matchingRefs.data) {
     const version = semver.parse(ref.ref.replace(/^refs\/tags\//g, ''), { loose: true })
-
-    if (version !== null) {
-      if (ref.object !== undefined) {
-        objectsByVersion[`${version}`] = ref.object as GitRefObject
-      }
-      versions.push(version)
+    if (version === null) {
+      continue
     }
-  })
+    if (ref.object !== undefined) {
+      objectsByVersion[`${version}`] = ref.object as GitRefObject
+    }
+    versions.push(version)
+  }
 
+  // Sort descending so the newest version is first.
   versions.sort(semver.rcompare)
 
   if (config.baseBranch) {
@@ -104,9 +129,5 @@ export async function getCurrentVersion(config: Pick<ActionConfig, 'octokit' | '
     return getLatestVersionInCommits(commits, versions, objectsByVersion, config)
   }
 
-  if (versions[0] !== undefined) {
-    return `${versions[0]}`
-  }
-
-  return DEFAULT_VERSION
+  return versions[0] !== undefined ? `${versions[0]}` : DEFAULT_VERSION
 }
