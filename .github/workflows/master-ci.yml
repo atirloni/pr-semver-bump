@@ -4,21 +4,33 @@ on:
     branches:
       - master
 
+permissions:
+  contents: write
+  issues: read
+  pull-requests: read
+
 jobs:
   test:
     name: Run Unit Tests
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - run: npm ci
-    - run: npm test
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm all
 
   bump-version:
     name: Tag New Release Version
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: ./
         name: Bump and Tag New Release Version
         with:
