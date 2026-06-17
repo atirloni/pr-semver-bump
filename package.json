@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "description": "A GitHub Action to bump and tag a new semantic version when a pull request is merged.",
   "main": "dist/index.js",
-  "packageManager": "pnpm@10.32.1",
+  "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=24"
   },
